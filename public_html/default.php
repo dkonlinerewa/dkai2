@@ -1,14 +1,1632 @@
 <?php
-// dkai.php - Main application logic
-require_once 'config.php';
+define('APP_ROOT', dirname(__DIR__));
+define('CONFIG_DIR', __DIR__);
 
+define('CONFIG_LOADED', true);
+if (file_exists(APP_ROOT . '/.env.php')) {
+    require_once APP_ROOT . '/.env.php';
+} else {
+    die('Configuration file not found. Please create .env.php');
+}
+
+if (ENVIRONMENT === 'development') {
+    error_reporting(E_ALL);
+    ini_set('display_errors', 1);
+    ini_set('display_startup_errors', 1);
+} else {
+    error_reporting(0);
+    ini_set('display_errors', 0);
+}
+
+ini_set('log_errors', 1);
+ini_set('error_log', APP_ROOT . '/logs/php_errors.log');
+
+// ============================================
+// APPLICATION CONSTANTS
+// ============================================
+define('UPLOAD_DIR', APP_ROOT . '/uploads/');
+define('MAX_FILE_SIZE', 10 * 1024 * 1024); // 10MB
+define('ALLOWED_TYPES', ['pdf', 'txt', 'doc', 'docx', 'csv', 'md', 'rtf', 'xls', 'xlsx', 'ppt', 'pptx']);
+define('IMAGE_TYPES', ['jpg', 'jpeg', 'png', 'gif', 'webp']);
+define('SESSION_LIFETIME', 24 * 60 * 60); // 24 hours
+define('MAX_LOGIN_ATTEMPTS', 5);
+define('LOCKOUT_TIME', 15 * 60); // 15 minutes
+define('API_RATE_LIMIT', 100); // Requests per hour
+define('PASSWORD_MIN_LENGTH', 8);
+define('TOKEN_EXPIRY', 3600); // 1 hour
+
+// ============================================
+// FILE PATHS
+// ============================================
+define('TEMPLATES_DIR', APP_ROOT . '/templates/');
+define('LOGS_DIR', APP_ROOT . '/logs/');
+define('CACHE_DIR', APP_ROOT . '/cache/');
+define('BACKUP_DIR', APP_ROOT . '/backups/');
+
+// ============================================
+// SECURITY FUNCTIONS
+// ============================================
+
+/**
+ * Generate cryptographically secure token
+ */
+function generateToken($length = 32) {
+    return bin2hex(random_bytes($length));
+}
+
+/**
+ * Generate secure password hash
+ */
+function hashPassword($password) {
+    return password_hash($password, PASSWORD_DEFAULT);
+}
+
+/**
+ * Validate password strength
+ */
+function validatePassword($password) {
+    if (strlen($password) < PASSWORD_MIN_LENGTH) {
+        return "Password must be at least " . PASSWORD_MIN_LENGTH . " characters long";
+    }
+    
+    if (!preg_match('/[A-Z]/', $password)) {
+        return "Password must contain at least one uppercase letter";
+    }
+    
+    if (!preg_match('/[a-z]/', $password)) {
+        return "Password must contain at least one lowercase letter";
+    }
+    
+    if (!preg_match('/[0-9]/', $password)) {
+        return "Password must contain at least one number";
+    }
+    
+    if (!preg_match('/[\W_]/', $password)) {
+        return "Password must contain at least one special character";
+    }
+    
+    return true;
+}
+
+/**
+ * Sanitize input data
+ */
+function sanitize($input, $type = 'string') {
+    if (is_array($input)) {
+        return array_map('sanitize', $input);
+    }
+    
+    $input = trim($input);
+    
+    switch ($type) {
+        case 'email':
+            $input = filter_var($input, FILTER_SANITIZE_EMAIL);
+            break;
+        case 'url':
+            $input = filter_var($input, FILTER_SANITIZE_URL);
+            break;
+        case 'int':
+            $input = filter_var($input, FILTER_SANITIZE_NUMBER_INT);
+            break;
+        case 'float':
+            $input = filter_var($input, FILTER_SANITIZE_NUMBER_FLOAT, FILTER_FLAG_ALLOW_FRACTION);
+            break;
+        case 'string':
+        default:
+            $input = htmlspecialchars($input, ENT_QUOTES, 'UTF-8');
+            break;
+    }
+    
+    return $input;
+}
+
+/**
+ * Validate email format
+ */
+function validateEmail($email) {
+    return filter_var($email, FILTER_VALIDATE_EMAIL);
+}
+
+/**
+ * Get client IP address
+ */
+function getClientIP() {
+    $headers = [
+        'HTTP_CLIENT_IP',
+        'HTTP_X_FORWARDED_FOR',
+        'HTTP_X_FORWARDED',
+        'HTTP_X_CLUSTER_CLIENT_IP',
+        'HTTP_FORWARDED_FOR',
+        'HTTP_FORWARDED',
+        'REMOTE_ADDR'
+    ];
+    
+    foreach ($headers as $header) {
+        if (!empty($_SERVER[$header])) {
+            $ip_list = explode(',', $_SERVER[$header]);
+            foreach ($ip_list as $ip) {
+                $ip = trim($ip);
+                if (filter_var($ip, FILTER_VALIDATE_IP)) {
+                    return $ip;
+                }
+            }
+        }
+    }
+    
+    return '0.0.0.0';
+}
+
+/**
+ * Check if IP is blocked
+ */
+function isIPBlocked($ip) {
+    $db = getDBConnection();
+    $stmt = $db->prepare("SELECT COUNT(*) FROM ip_blocks WHERE ip_address = ? AND expires_at > NOW()");
+    $stmt->bind_param("s", $ip);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $count = $result->fetch_array()[0];
+    $stmt->close();
+    
+    return $count > 0;
+}
+
+// ============================================
+// DATABASE CONNECTION
+// ============================================
+
+/**
+ * Get database connection
+ */
+function getDBConnection() {
+    static $db = null;
+    
+    if ($db === null || !$db->ping()) {
+        try {
+            $db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME, DB_PORT);
+            
+            if ($db->connect_error) {
+                throw new Exception("MySQL Connection failed: " . $db->connect_error);
+            }
+            
+            $db->set_charset(DB_CHARSET);
+            
+            // Set timezone
+            $db->query("SET time_zone = '+00:00'");
+            
+        } catch (Exception $e) {
+            error_log("Database connection error: " . $e->getMessage());
+            
+            // Try to create database if it doesn't exist
+            if ($e->getCode() == 1049) {
+                try {
+                    $temp_db = new mysqli(DB_HOST, DB_USER, DB_PASS, '', DB_PORT);
+                    $temp_db->query("CREATE DATABASE IF NOT EXISTS " . DB_NAME . " CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+                    $temp_db->select_db(DB_NAME);
+                    $db = $temp_db;
+                    $db->set_charset(DB_CHARSET);
+                    return $db;
+                } catch (Exception $create_error) {
+                    // Continue to throw original error
+                }
+            }
+            
+            // In production, show user-friendly message
+            if (ENVIRONMENT === 'production') {
+                die("Database connection failed. Please try again later.");
+            } else {
+                die("Database connection failed: " . $e->getMessage());
+            }
+        }
+    }
+    
+    return $db;
+}
+
+/**
+ * Initialize database structure
+ */
+function initDatabase() {
+    $db = getDBConnection();
+    
+    try {
+        // Create tables if they don't exist
+        $tables = [
+            'users' => "CREATE TABLE IF NOT EXISTS users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(100) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                email VARCHAR(255) UNIQUE,
+                phone VARCHAR(20),
+                user_type VARCHAR(20) NOT NULL DEFAULT 'user',
+                full_name VARCHAR(255),
+                department VARCHAR(100),
+                profile_image VARCHAR(255),
+                reset_token VARCHAR(64),
+                reset_expiry DATETIME,
+                two_factor_secret VARCHAR(255),
+                two_factor_enabled TINYINT(1) DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login DATETIME,
+                last_password_change DATETIME,
+                is_active TINYINT(1) DEFAULT 1,
+                failed_login_attempts INT DEFAULT 0,
+                lockout_until DATETIME,
+                preferences TEXT,
+                INDEX idx_user_type (user_type),
+                INDEX idx_username (username),
+                INDEX idx_email (email),
+                INDEX idx_created_at (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'documents' => "CREATE TABLE IF NOT EXISTS documents (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                filename VARCHAR(255) NOT NULL,
+                original_filename VARCHAR(255) NOT NULL,
+                title VARCHAR(255),
+                description TEXT,
+                filepath VARCHAR(500) NOT NULL,
+                thumbnail VARCHAR(255),
+                file_type VARCHAR(50) NOT NULL,
+                file_size INT,
+                checksum VARCHAR(64),
+                category VARCHAR(100),
+                tags TEXT,
+                content_text TEXT,
+                processed TINYINT(1) DEFAULT 0,
+                uploaded_by INT,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(50) DEFAULT 'pending',
+                is_deleted TINYINT(1) DEFAULT 0,
+                version INT DEFAULT 1,
+                INDEX idx_processed (processed),
+                INDEX idx_uploaded_by (uploaded_by),
+                INDEX idx_is_deleted (is_deleted),
+                INDEX idx_status (status),
+                INDEX idx_category (category),
+                FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'knowledge_base' => "CREATE TABLE IF NOT EXISTS knowledge_base (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                document_id INT,
+                title VARCHAR(255),
+                content_chunk TEXT NOT NULL,
+                chunk_hash VARCHAR(32) UNIQUE,
+                metadata TEXT,
+                importance INT DEFAULT 1,
+                vector_embedding TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_accessed TIMESTAMP NULL,
+                INDEX idx_chunk_hash (chunk_hash),
+                INDEX idx_document_id (document_id),
+                INDEX idx_importance (importance),
+                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE ON UPDATE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'chat_sessions' => "CREATE TABLE IF NOT EXISTS chat_sessions (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                session_id VARCHAR(100) UNIQUE NOT NULL,
+                user_id INT,
+                ip_address VARCHAR(45),
+                user_agent TEXT,
+                device_type VARCHAR(50),
+                country VARCHAR(50),
+                language VARCHAR(10) DEFAULT 'en',
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                message_count INT DEFAULT 0,
+                INDEX idx_ip_address (ip_address),
+                INDEX idx_started_at (started_at),
+                INDEX idx_user_id (user_id),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'chat_messages' => "CREATE TABLE IF NOT EXISTS chat_messages (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                session_id VARCHAR(100) NOT NULL,
+                message_type VARCHAR(20) NOT NULL,
+                content TEXT NOT NULL,
+                response_options TEXT,
+                selected_option INT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_session_id (session_id),
+                INDEX idx_created_at (created_at),
+                INDEX idx_session_type (session_id, message_type),
+                FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE ON UPDATE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'ai_training' => "CREATE TABLE IF NOT EXISTS ai_training (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                question TEXT NOT NULL,
+                question_hash VARCHAR(32) UNIQUE,
+                category VARCHAR(100),
+                tags TEXT,
+                difficulty VARCHAR(20) DEFAULT 'medium',
+                requires_context TINYINT(1) DEFAULT 0,
+                context_example TEXT,
+                response1 TEXT NOT NULL,
+                response2 TEXT NOT NULL,
+                response3 TEXT NOT NULL,
+                custom_response TEXT,
+                best_response INT DEFAULT 1,
+                is_custom TINYINT(1) DEFAULT 0,
+                trained_by INT,
+                trained_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                usage_count INT DEFAULT 0,
+                helpful_count INT DEFAULT 0,
+                not_helpful_count INT DEFAULT 0,
+                INDEX idx_question_hash (question_hash),
+                INDEX idx_trained_by (trained_by),
+                INDEX idx_helpful_count (helpful_count),
+                INDEX idx_category (category),
+                FOREIGN KEY (trained_by) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'system_logs' => "CREATE TABLE IF NOT EXISTS system_logs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                log_type VARCHAR(50) NOT NULL,
+                severity VARCHAR(20) DEFAULT 'info',
+                message TEXT NOT NULL,
+                details TEXT,
+                ip_address VARCHAR(45),
+                request_url VARCHAR(500),
+                user_id INT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_log_type (log_type),
+                INDEX idx_created_at (created_at),
+                INDEX idx_user_id (user_id),
+                INDEX idx_severity (severity)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'api_keys' => "CREATE TABLE IF NOT EXISTS api_keys (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                api_key VARCHAR(64) UNIQUE NOT NULL,
+                name VARCHAR(100),
+                domain VARCHAR(255) NOT NULL,
+                user_id INT,
+                is_active TINYINT(1) DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_used DATETIME,
+                usage_count INT DEFAULT 0,
+                rate_limit INT DEFAULT 100,
+                INDEX idx_api_key (api_key),
+                INDEX idx_domain (domain),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'response_ratings' => "CREATE TABLE IF NOT EXISTS response_ratings (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                message_id INT,
+                session_id VARCHAR(100) NOT NULL,
+                user_id INT,
+                question TEXT NOT NULL,
+                response TEXT NOT NULL,
+                rating TINYINT(1) NOT NULL COMMENT '1=helpful, 0=not helpful',
+                feedback TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_session_id (session_id),
+                INDEX idx_rating (rating),
+                INDEX idx_message_id (message_id),
+                INDEX idx_user_id (user_id),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'ip_blocks' => "CREATE TABLE IF NOT EXISTS ip_blocks (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ip_address VARCHAR(45) NOT NULL,
+                reason VARCHAR(255),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at DATETIME,
+                INDEX idx_ip_address (ip_address),
+                INDEX idx_expires_at (expires_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'user_sessions' => "CREATE TABLE IF NOT EXISTS user_sessions (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                session_token VARCHAR(64) UNIQUE NOT NULL,
+                ip_address VARCHAR(45),
+                user_agent TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at DATETIME,
+                INDEX idx_user_id (user_id),
+                INDEX idx_session_token (session_token),
+                INDEX idx_expires_at (expires_at),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'audit_logs' => "CREATE TABLE IF NOT EXISTS audit_logs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT,
+                action VARCHAR(100) NOT NULL,
+                entity_type VARCHAR(50),
+                entity_id INT,
+                old_value TEXT,
+                new_value TEXT,
+                ip_address VARCHAR(45),
+                user_agent TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_user_id (user_id),
+                INDEX idx_action (action),
+                INDEX idx_created_at (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'ai_response_reports' => "CREATE TABLE IF NOT EXISTS ai_response_reports (
+                report_id INT AUTO_INCREMENT PRIMARY KEY,
+                response_id INT,
+                reporter_id INT,
+                reporter_session VARCHAR(100),
+                reporter_ip VARCHAR(45),
+                report_type ENUM('incorrect', 'inappropriate', 'spam', 'other') NOT NULL DEFAULT 'incorrect',
+                description TEXT,
+                question_text TEXT,
+                response_text TEXT,
+                status ENUM('pending', 'verified', 'false', 'closed') NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                resolved_by INT,
+                resolved_at DATETIME,
+                resolution_notes TEXT,
+                is_false_report TINYINT(1) DEFAULT 0,
+                priority INT DEFAULT 0,
+                INDEX idx_response_id (response_id),
+                INDEX idx_reporter_id (reporter_id),
+                INDEX idx_status (status),
+                INDEX idx_created_at (created_at),
+                INDEX idx_report_type (report_type),
+                INDEX idx_reporter_session (reporter_session),
+                FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE SET NULL,
+                FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'response_corrections' => "CREATE TABLE IF NOT EXISTS response_corrections (
+                correction_id INT AUTO_INCREMENT PRIMARY KEY,
+                response_id INT,
+                report_id INT,
+                suggested_by INT NOT NULL,
+                correction_text TEXT NOT NULL,
+                original_response_text TEXT,
+                reasoning TEXT,
+                admin_approved TINYINT(1) DEFAULT 0,
+                approved_by INT,
+                approved_at DATETIME,
+                activated_at DATETIME,
+                is_active TINYINT(1) DEFAULT 0,
+                version INT DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_response_id (response_id),
+                INDEX idx_report_id (report_id),
+                INDEX idx_suggested_by (suggested_by),
+                INDEX idx_admin_approved (admin_approved),
+                INDEX idx_is_active (is_active),
+                FOREIGN KEY (suggested_by) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'admin_settings' => "CREATE TABLE IF NOT EXISTS admin_settings (
+                setting_id INT AUTO_INCREMENT PRIMARY KEY,
+                setting_key VARCHAR(100) UNIQUE NOT NULL,
+                setting_value TEXT,
+                setting_type VARCHAR(50) DEFAULT 'string',
+                description TEXT,
+                updated_by INT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_setting_key (setting_key),
+                FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'ai_responses' => "CREATE TABLE IF NOT EXISTS ai_responses (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                question_hash VARCHAR(32) UNIQUE,
+                question_text TEXT NOT NULL,
+                response_text TEXT NOT NULL,
+                training_id INT,
+                source_type VARCHAR(50) DEFAULT 'dynamic',
+                confidence_score DECIMAL(3,2) DEFAULT 0.00,
+                reporting_count INT DEFAULT 0,
+                correction_count INT DEFAULT 0,
+                helpful_count INT DEFAULT 0,
+                not_helpful_count INT DEFAULT 0,
+                is_active TINYINT(1) DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                last_used_at DATETIME,
+                version INT DEFAULT 1,
+                INDEX idx_question_hash (question_hash),
+                INDEX idx_is_active (is_active),
+                INDEX idx_reporting_count (reporting_count),
+                INDEX idx_created_at (created_at),
+                FOREIGN KEY (training_id) REFERENCES ai_training(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'response_versions' => "CREATE TABLE IF NOT EXISTS response_versions (
+                version_id INT AUTO_INCREMENT PRIMARY KEY,
+                response_id INT NOT NULL,
+                version_number INT NOT NULL,
+                response_text TEXT NOT NULL,
+                changed_by INT,
+                change_reason VARCHAR(255),
+                change_type VARCHAR(50) DEFAULT 'correction',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_response_id (response_id),
+                INDEX idx_version_number (version_number),
+                FOREIGN KEY (changed_by) REFERENCES users(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'response_cache' => "CREATE TABLE IF NOT EXISTS response_cache (
+                cache_id INT AUTO_INCREMENT PRIMARY KEY,
+                cache_key VARCHAR(64) UNIQUE NOT NULL,
+                question_text TEXT,
+                response_text TEXT NOT NULL,
+                metadata TEXT,
+                hit_count INT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at DATETIME,
+                INDEX idx_cache_key (cache_key),
+                INDEX idx_expires_at (expires_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'rate_limits' => "CREATE TABLE IF NOT EXISTS rate_limits (
+                limit_id INT AUTO_INCREMENT PRIMARY KEY,
+                identifier VARCHAR(100) NOT NULL,
+                identifier_type VARCHAR(50) NOT NULL,
+                request_count INT DEFAULT 1,
+                window_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_request TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                blocked_until DATETIME,
+                INDEX idx_identifier (identifier, identifier_type),
+                INDEX idx_window_start (window_start),
+                INDEX idx_blocked_until (blocked_until)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'csrf_tokens' => "CREATE TABLE IF NOT EXISTS csrf_tokens (
+                token_id INT AUTO_INCREMENT PRIMARY KEY,
+                token VARCHAR(64) UNIQUE NOT NULL,
+                user_id INT,
+                session_id VARCHAR(100),
+                ip_address VARCHAR(45),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at DATETIME,
+                used TINYINT(1) DEFAULT 0,
+                INDEX idx_token (token),
+                INDEX idx_user_id (user_id),
+                INDEX idx_expires_at (expires_at),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
+            'device_fingerprints' => "CREATE TABLE IF NOT EXISTS device_fingerprints (
+                fingerprint_id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT,
+                fingerprint_hash VARCHAR(64) NOT NULL,
+                user_agent TEXT,
+                ip_address VARCHAR(45),
+                screen_resolution VARCHAR(20),
+                timezone VARCHAR(50),
+                language VARCHAR(10),
+                platform VARCHAR(50),
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                is_trusted TINYINT(1) DEFAULT 0,
+                INDEX idx_user_id (user_id),
+                INDEX idx_fingerprint_hash (fingerprint_hash),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        ];
+        
+        foreach ($tables as $table => $sql) {
+            $db->query($sql);
+        }
+        
+        // Create default admin user if not exists
+        $check = $db->query("SELECT COUNT(*) as count FROM users WHERE username = 'admin'");
+        $result = $check->fetch_assoc();
+        
+        if ($result['count'] == 0) {
+            $stmt = $db->prepare("INSERT INTO users (username, password_hash, user_type, full_name, email, is_active) 
+                                  VALUES (?, ?, 'admin', 'Administrator', ?, 1)");
+            $stmt->bind_param("sss", 
+                $username, 
+                $password_hash, 
+                $email
+            );
+            
+            $username = 'admin';
+            $password_hash = hashPassword('Admin@123');
+            $email = 'admin@example.com';
+            $stmt->execute();
+            $stmt->close();
+            
+            logEvent('system', 'Default admin account created', null, 'info');
+        }
+        
+        $settings_check = $db->query("SELECT COUNT(*) as count FROM admin_settings");
+        if ($settings_check) {
+            $settings_result = $settings_check->fetch_assoc();
+            if ($settings_result['count'] == 0) {
+                $default_settings = [
+                    ['reporting_enabled', '1', 'boolean', 'Enable or disable the AI response reporting system'],
+                    ['approval_type', 'manual', 'string', 'Correction approval type: auto or manual'],
+                    ['auto_close_false_reports', '1', 'boolean', 'Automatically close reports marked as false'],
+                    ['notification_email', 'admin@example.com', 'string', 'Email for system notifications'],
+                    ['max_reports_per_user_per_day', '10', 'integer', 'Maximum number of reports a user can submit per day'],
+                    ['require_description', '0', 'boolean', 'Require description when submitting reports'],
+                    ['allow_anonymous_reports', '1', 'boolean', 'Allow reports from non-logged-in users'],
+                    ['response_cache_enabled', '1', 'boolean', 'Enable response caching for performance'],
+                    ['response_cache_ttl', '3600', 'integer', 'Response cache time-to-live in seconds'],
+                    ['rate_limit_enabled', '1', 'boolean', 'Enable rate limiting for API and chat'],
+                    ['rate_limit_requests', '100', 'integer', 'Number of requests allowed per time window'],
+                    ['rate_limit_window', '3600', 'integer', 'Rate limit time window in seconds'],
+                    ['csrf_protection_enabled', '1', 'boolean', 'Enable CSRF token protection'],
+                    ['content_filtering_enabled', '1', 'boolean', 'Enable basic content filtering for spam/NSFW'],
+                    ['device_fingerprinting_enabled', '1', 'boolean', 'Enable device fingerprinting for security']
+                ];
+                
+                $stmt = $db->prepare("INSERT INTO admin_settings (setting_key, setting_value, setting_type, description) 
+                                      VALUES (?, ?, ?, ?)");
+                foreach ($default_settings as $setting) {
+                    $stmt->bind_param("ssss", $setting[0], $setting[1], $setting[2], $setting[3]);
+                    $stmt->execute();
+                }
+                $stmt->close();
+                logEvent('system', 'Default admin settings created', null, 'info');
+            }
+        }
+        
+        createDirectories();
+        
+        return $db;
+        
+    } catch (Exception $e) {
+        error_log("Database initialization failed: " . $e->getMessage());
+        logEvent('error', "Database initialization failed: " . $e->getMessage(), null, 'critical');
+        
+        if (ENVIRONMENT === 'production') {
+            die("System initialization failed. Please contact administrator.");
+        } else {
+            die("Database initialization failed: " . $e->getMessage());
+        }
+    }
+}
+
+// ============================================
+// LOGGING FUNCTIONS
+// ============================================
+
+/**
+ * Log system events
+ */
+function logEvent($type, $message, $userId = null, $severity = 'info', $details = null) {
+    $db = getDBConnection();
+    
+    try {
+        $stmt = $db->prepare("INSERT INTO system_logs (log_type, severity, message, details, ip_address, request_url, user_id) 
+                              VALUES (?, ?, ?, ?, ?, ?, ?)");
+        if ($stmt) {
+            $stmt->bind_param("ssssssi", 
+                $type, 
+                $severity, 
+                $message, 
+                $details,
+                $ip, 
+                $request_url,
+                $userId
+            );
+            
+            $ip = getClientIP();
+            $request_url = $_SERVER['REQUEST_URI'] ?? '';
+            $stmt->execute();
+            $stmt->close();
+        }
+    } catch (Exception $e) {
+        // Fallback to file logging if database fails
+        $log_message = date('[Y-m-d H:i:s]') . " [$severity] [$type] $message";
+        if ($userId) $log_message .= " UserID: $userId";
+        if ($details) $log_message .= " Details: $details";
+        error_log($log_message);
+    }
+}
+
+/**
+ * Log audit trail
+ */
+function auditLog($action, $entityType = null, $entityId = null, $oldValue = null, $newValue = null) {
+    $db = getDBConnection();
+    
+    try {
+        $stmt = $db->prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, old_value, new_value, ip_address, user_agent) 
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt->bind_param("issiisss",
+            $userId,
+            $action,
+            $entityType,
+            $entityId,
+            $oldValue,
+            $newValue,
+            $ip,
+            $userAgent
+        );
+        
+        $userId = $_SESSION['user_id'] ?? null;
+        $ip = getClientIP();
+        $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+        $stmt->execute();
+        $stmt->close();
+    } catch (Exception $e) {
+        error_log("Audit log failed: " . $e->getMessage());
+    }
+}
+
+// ============================================
+// DIRECTORY MANAGEMENT
+// ============================================
+
+/**
+ * Create necessary directories
+ */
+function createDirectories() {
+    $directories = [
+        UPLOAD_DIR,
+        UPLOAD_DIR . 'documents/',
+        UPLOAD_DIR . 'profiles/',
+        UPLOAD_DIR . 'temp/',
+        UPLOAD_DIR . 'backups/',
+        LOGS_DIR,
+        CACHE_DIR,
+        BACKUP_DIR
+    ];
+    
+    foreach ($directories as $dir) {
+        if (!file_exists($dir)) {
+            mkdir($dir, 0755, true);
+            // Create .htaccess for security
+            if (strpos($dir, 'uploads') !== false) {
+                file_put_contents($dir . '.htaccess', 
+                    "Order deny,allow\nDeny from all\n<FilesMatch \"\.(jpg|jpeg|png|gif|pdf|txt)$\">\nAllow from all\n</FilesMatch>");
+            }
+        }
+    }
+    
+    // Create index.html in each directory to prevent directory listing
+    $index_html = '<!DOCTYPE html><html><head><title>403 Forbidden</title></head><body><h1>Access Forbidden</h1></body></html>';
+    foreach ($directories as $dir) {
+        if (!file_exists($dir . 'index.html')) {
+            file_put_contents($dir . 'index.html', $index_html);
+        }
+    }
+}
+
+// ============================================
+// SESSION MANAGEMENT
+// ============================================
+
+/**
+ * Start secure session
+ */
+function startSecureSession() {
+    // Use cookies only
+    ini_set('session.use_only_cookies', 1);
+    ini_set('session.use_strict_mode', 1);
+    
+    // Set session cookie parameters
+    session_set_cookie_params([
+        'lifetime' => SESSION_LIFETIME,
+        'path' => '/',
+        'domain' => $_SERVER['HTTP_HOST'] ?? '',
+        'secure' => isset($_SERVER['HTTPS']),
+        'httponly' => true,
+        'samesite' => 'Strict'
+    ]);
+    
+    // Set session name
+    session_name('AI_CHAT_SESSION');
+    
+    // Start session
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
+    
+    // Regenerate session ID periodically
+    if (!isset($_SESSION['last_regeneration'])) {
+        session_regenerate_id(true);
+        $_SESSION['last_regeneration'] = time();
+    } elseif (time() - $_SESSION['last_regeneration'] > 1800) { // 30 minutes
+        session_regenerate_id(true);
+        $_SESSION['last_regeneration'] = time();
+    }
+}
+
+// ============================================
+// FILE UPLOAD FUNCTIONS
+// ============================================
+
+/**
+ * Validate uploaded file
+ */
+function validateUploadedFile($file, $allowedTypes = ALLOWED_TYPES) {
+    $errors = [];
+    
+    // Check for upload errors
+    if ($file['error'] !== UPLOAD_ERR_OK) {
+        $uploadErrors = [
+            UPLOAD_ERR_INI_SIZE => 'File exceeds upload_max_filesize directive in php.ini',
+            UPLOAD_ERR_FORM_SIZE => 'File exceeds MAX_FILE_SIZE directive in HTML form',
+            UPLOAD_ERR_PARTIAL => 'File was only partially uploaded',
+            UPLOAD_ERR_NO_FILE => 'No file was uploaded',
+            UPLOAD_ERR_NO_TMP_DIR => 'Missing temporary folder',
+            UPLOAD_ERR_CANT_WRITE => 'Failed to write file to disk',
+            UPLOAD_ERR_EXTENSION => 'File upload stopped by extension'
+        ];
+        $errors[] = $uploadErrors[$file['error']] ?? 'Unknown upload error';
+        return [false, $errors];
+    }
+    
+    // Check file size
+    if ($file['size'] > MAX_FILE_SIZE) {
+        $errors[] = 'File too large (max ' . (MAX_FILE_SIZE / (1024*1024)) . 'MB)';
+    }
+    
+    // Check file type
+    $file_ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+    if (!in_array($file_ext, $allowedTypes)) {
+        $errors[] = 'File type not allowed. Allowed: ' . implode(', ', $allowedTypes);
+    }
+    
+    // Check for malicious files (simple check)
+    $dangerous_extensions = ['php', 'phtml', 'php3', 'php4', 'php5', 'php7', 'phps', 'html', 'htm', 'js'];
+    if (in_array($file_ext, $dangerous_extensions) && !in_array($file_ext, $allowedTypes)) {
+        $errors[] = 'Potentially dangerous file type';
+    }
+    
+    // Check MIME type
+    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+    $mime_type = finfo_file($finfo, $file['tmp_name']);
+    finfo_close($finfo);
+    
+    $allowed_mimes = [
+        'pdf' => 'application/pdf',
+        'txt' => 'text/plain',
+        'doc' => 'application/msword',
+        'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'csv' => 'text/csv',
+        'md' => 'text/markdown',
+        'rtf' => 'application/rtf',
+        'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'png' => 'image/png',
+        'gif' => 'image/gif'
+    ];
+    
+    if (isset($allowed_mimes[$file_ext]) && $allowed_mimes[$file_ext] !== $mime_type) {
+        $errors[] = 'File MIME type does not match extension';
+    }
+    
+    return [empty($errors), $errors];
+}
+
+/**
+ * Generate safe filename
+ */
+function generateSafeFilename($original_name) {
+    $extension = strtolower(pathinfo($original_name, PATHINFO_EXTENSION));
+    $basename = preg_replace('/[^a-zA-Z0-9_-]/', '_', pathinfo($original_name, PATHINFO_FILENAME));
+    $basename = substr($basename, 0, 100); // Limit length
+    return time() . '_' . $basename . '.' . $extension;
+}
+
+/**
+ * Calculate file checksum
+ */
+function calculateFileChecksum($filepath) {
+    return hash_file('sha256', $filepath);
+}
+
+// ============================================
+// MISSING TEXT EXTRACTION FUNCTIONS
+// ============================================
+
+/**
+ * Extract text from Excel files
+ */
+function extractTextFromExcel($filepath) {
+    if (!class_exists('ZipArchive')) {
+        return "Excel file uploaded. For text extraction, please convert to CSV or TXT format.";
+    }
+    
+    $content = '';
+    
+    try {
+        // For XLSX files (ZIP-based)
+        $zip = new ZipArchive;
+        if ($zip->open($filepath) === TRUE) {
+            // Look for shared strings
+            if (($index = $zip->locateName('xl/sharedStrings.xml')) !== FALSE) {
+                $xml_content = $zip->getFromIndex($index);
+                // Extract text from XML
+                $xml = simplexml_load_string($xml_content);
+                if ($xml) {
+                    foreach ($xml->children() as $si) {
+                        $content .= $si->t . ' ';
+                    }
+                }
+            }
+            $zip->close();
+        }
+    } catch (Exception $e) {
+        // Fallback message
+        $content = "Excel file uploaded. Content extracted partially. For better results, save as CSV.";
+    }
+    
+    if (empty($content)) {
+        $content = "Excel file processed. To extract all text, please save as CSV format.";
+    }
+    
+    return $content;
+}
+
+/**
+ * Extract text from PowerPoint files
+ */
+function extractTextFromPowerPoint($filepath) {
+    if (!class_exists('ZipArchive')) {
+        return "PowerPoint file uploaded. For text extraction, please save as PDF or TXT.";
+    }
+    
+    $content = '';
+    
+    try {
+        $zip = new ZipArchive;
+        if ($zip->open($filepath) === TRUE) {
+            // Look for slide content
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+                $filename = $zip->getNameIndex($i);
+                if (preg_match('/ppt\/slides\/slide\d+\.xml/', $filename)) {
+                    $xml_content = $zip->getFromIndex($i);
+                    // Simple XML extraction
+                    $xml_content = preg_replace('/<[^>]+>/', ' ', $xml_content);
+                    $xml_content = preg_replace('/\s+/', ' ', $xml_content);
+                    $content .= $xml_content . ' ';
+                }
+            }
+            $zip->close();
+        }
+    } catch (Exception $e) {
+        $content = "PowerPoint file uploaded. Text extraction limited.";
+    }
+    
+    if (empty($content)) {
+        $content = "PowerPoint file uploaded. For full text extraction, save as PDF or export text.";
+    }
+    
+    return $content;
+}
+
+// ============================================
+// MISSING SYSTEM FUNCTIONS
+// ============================================
+
+/**
+ * Check write permissions for all directories
+ */
+function checkWritePermissions() {
+    $directories = [
+        UPLOAD_DIR,
+        UPLOAD_DIR . 'documents/',
+        UPLOAD_DIR . 'profiles/',
+        UPLOAD_DIR . 'temp/',
+        LOGS_DIR,
+        CACHE_DIR
+    ];
+    
+    $errors = [];
+    foreach ($directories as $dir) {
+        if (!is_writable($dir)) {
+            $errors[] = "Directory not writable: $dir";
+        }
+    }
+    
+    return $errors;
+}
+
+/**
+ * Backup database
+ */
+function backupDatabase() {
+    $db = getDBConnection();
+    $backup_file = BACKUP_DIR . 'backup_' . date('Y-m-d_H-i-s') . '.sql';
+    
+    try {
+        $tables = [];
+        $result = $db->query('SHOW TABLES');
+        while ($row = $result->fetch_row()) {
+            $tables[] = $row[0];
+        }
+        
+        $sql = "-- Database Backup\n";
+        $sql .= "-- Generated: " . date('Y-m-d H:i:s') . "\n\n";
+        
+        foreach ($tables as $table) {
+            // Drop table if exists
+            $sql .= "DROP TABLE IF EXISTS `$table`;\n";
+            
+            // Create table
+            $create = $db->query("SHOW CREATE TABLE `$table`");
+            $row = $create->fetch_row();
+            $sql .= $row[1] . ";\n\n";
+            
+            // Insert data
+            $result = $db->query("SELECT * FROM `$table`");
+            if ($result->num_rows > 0) {
+                $sql .= "INSERT INTO `$table` VALUES\n";
+                $rows = [];
+                while ($row = $result->fetch_row()) {
+                    $values = array_map(function($value) use ($db) {
+                        if ($value === null) return 'NULL';
+                        return "'" . $db->real_escape_string($value) . "'";
+                    }, $row);
+                    $rows[] = "(" . implode(', ', $values) . ")";
+                }
+                $sql .= implode(",\n", $rows) . ";\n\n";
+            }
+        }
+        
+        file_put_contents($backup_file, $sql);
+        logEvent('backup', 'Database backup created: ' . basename($backup_file));
+        
+        return [true, 'Backup created successfully', basename($backup_file)];
+    } catch (Exception $e) {
+        logEvent('error', 'Backup failed: ' . $e->getMessage());
+        return [false, 'Backup failed: ' . $e->getMessage()];
+    }
+}
+
+/**
+ * Get system information
+ */
+function getSystemInfo() {
+    $info = [
+        'php_version' => PHP_VERSION,
+        'mysql_version' => 'N/A',
+        'server_software' => $_SERVER['SERVER_SOFTWARE'] ?? 'Unknown',
+        'upload_max_filesize' => ini_get('upload_max_filesize'),
+        'post_max_size' => ini_get('post_max_size'),
+        'memory_limit' => ini_get('memory_limit'),
+        'max_execution_time' => ini_get('max_execution_time'),
+        'disk_free_space' => disk_free_space(__DIR__),
+        'disk_total_space' => disk_total_space(__DIR__),
+        'server_time' => date('Y-m-d H:i:s'),
+        'timezone' => date_default_timezone_get()
+    ];
+    
+    try {
+        $db = getDBConnection();
+        $result = $db->query('SELECT VERSION() as version');
+        $row = $result->fetch_assoc();
+        $info['mysql_version'] = $row['version'] ?? 'N/A';
+    } catch (Exception $e) {
+        // Ignore
+    }
+    
+    return $info;
+}
+
+function generateCSRFToken() {
+    if (!isset($_SESSION['csrf_token']) || !isset($_SESSION['csrf_token_time']) || 
+        (time() - $_SESSION['csrf_token_time']) > 3600) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+        $_SESSION['csrf_token_time'] = time();
+    }
+    return $_SESSION['csrf_token'];
+}
+
+function validateCSRFToken($token) {
+    if (!isset($_SESSION['csrf_token']) || !isset($_SESSION['csrf_token_time'])) {
+        return false;
+    }
+    if ((time() - $_SESSION['csrf_token_time']) > 3600) {
+        return false;
+    }
+    return hash_equals($_SESSION['csrf_token'], $token);
+}
+
+function checkRateLimit($identifier, $type = 'ip', $max_requests = 100, $window = 3600) {
+    $db = getDBConnection();
+    $stmt = $db->prepare("SELECT request_count, window_start, blocked_until FROM rate_limits 
+                          WHERE identifier = ? AND identifier_type = ?");
+    $stmt->bind_param("ss", $identifier, $type);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $limit = $result->fetch_assoc();
+    $stmt->close();
+    
+    $current_time = time();
+    
+    if ($limit) {
+        if ($limit['blocked_until'] && strtotime($limit['blocked_until']) > $current_time) {
+            return [false, 'Rate limit exceeded. Try again later.'];
+        }
+        
+        $window_start = strtotime($limit['window_start']);
+        if (($current_time - $window_start) > $window) {
+            $stmt = $db->prepare("UPDATE rate_limits SET request_count = 1, window_start = NOW(), 
+                                  last_request = NOW(), blocked_until = NULL 
+                                  WHERE identifier = ? AND identifier_type = ?");
+            $stmt->bind_param("ss", $identifier, $type);
+            $stmt->execute();
+            $stmt->close();
+            return [true, 'OK'];
+        }
+        
+        if ($limit['request_count'] >= $max_requests) {
+            $blocked_until = date('Y-m-d H:i:s', $current_time + 900);
+            $stmt = $db->prepare("UPDATE rate_limits SET blocked_until = ? 
+                                  WHERE identifier = ? AND identifier_type = ?");
+            $stmt->bind_param("sss", $blocked_until, $identifier, $type);
+            $stmt->execute();
+            $stmt->close();
+            return [false, 'Rate limit exceeded. Blocked for 15 minutes.'];
+        }
+        
+        $stmt = $db->prepare("UPDATE rate_limits SET request_count = request_count + 1, 
+                              last_request = NOW() WHERE identifier = ? AND identifier_type = ?");
+        $stmt->bind_param("ss", $identifier, $type);
+        $stmt->execute();
+        $stmt->close();
+    } else {
+        $stmt = $db->prepare("INSERT INTO rate_limits (identifier, identifier_type, request_count) 
+                              VALUES (?, ?, 1)");
+        $stmt->bind_param("ss", $identifier, $type);
+        $stmt->execute();
+        $stmt->close();
+    }
+    
+    return [true, 'OK'];
+}
+
+function getCachedResponse($question_hash) {
+    $db = getDBConnection();
+    $stmt = $db->prepare("SELECT response_text, metadata FROM response_cache 
+                          WHERE cache_key = ? AND (expires_at IS NULL OR expires_at > NOW())");
+    $stmt->bind_param("s", $question_hash);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $cached = $result->fetch_assoc();
+    $stmt->close();
+    
+    if ($cached) {
+        $db->query("UPDATE response_cache SET hit_count = hit_count + 1 WHERE cache_key = '$question_hash'");
+        return $cached;
+    }
+    return null;
+}
+
+function cacheResponse($question_hash, $question_text, $response_text, $metadata = null, $ttl = 3600) {
+    $db = getDBConnection();
+    $expires_at = date('Y-m-d H:i:s', time() + $ttl);
+    
+    $stmt = $db->prepare("INSERT INTO response_cache (cache_key, question_text, response_text, metadata, expires_at) 
+                          VALUES (?, ?, ?, ?, ?) 
+                          ON DUPLICATE KEY UPDATE response_text = ?, metadata = ?, expires_at = ?, hit_count = 0");
+    $stmt->bind_param("ssssssss", $question_hash, $question_text, $response_text, $metadata, 
+                      $expires_at, $response_text, $metadata, $expires_at);
+    $stmt->execute();
+    $stmt->close();
+}
+
+function filterContent($content) {
+    $spam_patterns = [
+        '/\b(viagra|cialis|pharmacy|casino|poker|lottery)\b/i',
+        '/\b(click here|buy now|limited offer|act now)\b/i',
+        '/https?:\/\/[^\s]+\b/i',
+    ];
+    
+    foreach ($spam_patterns as $pattern) {
+        if (preg_match($pattern, $content)) {
+            return [false, 'Content contains inappropriate or spam-like text'];
+        }
+    }
+    
+    return [true, 'OK'];
+}
+
+function saveDeviceFingerprint($user_id, $fingerprint_data) {
+    $db = getDBConnection();
+    $fingerprint_hash = hash('sha256', json_encode($fingerprint_data));
+    
+    $stmt = $db->prepare("INSERT INTO device_fingerprints 
+                          (user_id, fingerprint_hash, user_agent, ip_address, screen_resolution, 
+                           timezone, language, platform, is_trusted) 
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                          ON DUPLICATE KEY UPDATE last_seen = NOW()");
+    $stmt->bind_param("isssssss",
+        $user_id,
+        $fingerprint_hash,
+        $fingerprint_data['userAgent'] ?? null,
+        $fingerprint_data['ipAddress'] ?? null,
+        $fingerprint_data['screenResolution'] ?? null,
+        $fingerprint_data['timezone'] ?? null,
+        $fingerprint_data['language'] ?? null,
+        $fingerprint_data['platform'] ?? null
+    );
+    $stmt->execute();
+    $stmt->close();
+    
+    return $fingerprint_hash;
+}
+
+function getSetting($key, $default = null) {
+    $db = getDBConnection();
+    $stmt = $db->prepare("SELECT setting_value, setting_type FROM admin_settings WHERE setting_key = ?");
+    $stmt->bind_param("s", $key);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $setting = $result->fetch_assoc();
+    $stmt->close();
+    
+    if (!$setting) {
+        return $default;
+    }
+    
+    $value = $setting['setting_value'];
+    switch ($setting['setting_type']) {
+        case 'boolean':
+            return (bool)$value;
+        case 'integer':
+            return (int)$value;
+        case 'float':
+            return (float)$value;
+        case 'json':
+            return json_decode($value, true);
+        default:
+            return $value;
+    }
+}
+
+function updateSetting($key, $value, $user_id = null) {
+    $db = getDBConnection();
+    $stmt = $db->prepare("UPDATE admin_settings SET setting_value = ?, updated_by = ? WHERE setting_key = ?");
+    $stmt->bind_param("sis", $value, $user_id, $key);
+    $stmt->execute();
+    $affected = $stmt->affected_rows;
+    $stmt->close();
+    
+    if ($affected > 0) {
+        auditLog('update_setting', 'admin_settings', null, null, "$key = $value");
+        return true;
+    }
+    return false;
+}
+
+function submitReport($response_id, $question_text, $response_text, $report_type, $description = null) {
+    $db = getDBConnection();
+    
+    $reporter_id = $_SESSION['user_id'] ?? null;
+    $reporter_session = session_id();
+    $reporter_ip = getClientIP();
+    
+    if (!getSetting('reporting_enabled', true)) {
+        return [false, 'Reporting system is currently disabled'];
+    }
+    
+    if (!getSetting('allow_anonymous_reports', true) && !$reporter_id) {
+        return [false, 'You must be logged in to submit reports'];
+    }
+    
+    if (getSetting('require_description', false) && empty($description)) {
+        return [false, 'Description is required for reports'];
+    }
+    
+    $max_reports = getSetting('max_reports_per_user_per_day', 10);
+    if ($reporter_id) {
+        $stmt = $db->prepare("SELECT COUNT(*) as count FROM ai_response_reports 
+                              WHERE reporter_id = ? AND DATE(created_at) = CURDATE()");
+        $stmt->bind_param("i", $reporter_id);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $row = $result->fetch_assoc();
+        $stmt->close();
+        
+        if ($row['count'] >= $max_reports) {
+            return [false, 'Daily report limit reached'];
+        }
+    }
+    
+    $stmt = $db->prepare("INSERT INTO ai_response_reports 
+                          (response_id, reporter_id, reporter_session, reporter_ip, report_type, 
+                           description, question_text, response_text, status) 
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')");
+    $stmt->bind_param("iissssss",
+        $response_id,
+        $reporter_id,
+        $reporter_session,
+        $reporter_ip,
+        $report_type,
+        $description,
+        $question_text,
+        $response_text
+    );
+    $stmt->execute();
+    $report_id = $db->insert_id;
+    $stmt->close();
+    
+    if ($response_id) {
+        $db->query("UPDATE ai_responses SET reporting_count = reporting_count + 1 WHERE id = $response_id");
+    }
+    
+    logEvent('report', "Response reported: $report_type", $reporter_id);
+    auditLog('submit_report', 'ai_response_reports', $report_id);
+    
+    return [true, 'Report submitted successfully', $report_id];
+}
+
+function suggestCorrection($response_id, $report_id, $correction_text, $reasoning = null) {
+    $db = getDBConnection();
+    
+    $user_id = $_SESSION['user_id'] ?? null;
+    if (!$user_id || !isStaff()) {
+        return [false, 'Only staff members can suggest corrections'];
+    }
+    
+    $stmt = $db->prepare("SELECT response_text FROM ai_responses WHERE id = ?");
+    $stmt->bind_param("i", $response_id);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $response = $result->fetch_assoc();
+    $stmt->close();
+    
+    if (!$response) {
+        return [false, 'Response not found'];
+    }
+    
+    $stmt = $db->prepare("INSERT INTO response_corrections 
+                          (response_id, report_id, suggested_by, correction_text, 
+                           original_response_text, reasoning, admin_approved) 
+                          VALUES (?, ?, ?, ?, ?, ?, 0)");
+    $stmt->bind_param("iiisss",
+        $response_id,
+        $report_id,
+        $user_id,
+        $correction_text,
+        $response['response_text'],
+        $reasoning
+    );
+    $stmt->execute();
+    $correction_id = $db->insert_id;
+    $stmt->close();
+    
+    $db->query("UPDATE ai_response_reports SET status = 'verified' WHERE report_id = $report_id");
+    
+    logEvent('correction', "Correction suggested for response $response_id", $user_id);
+    auditLog('suggest_correction', 'response_corrections', $correction_id);
+    
+    return [true, 'Correction suggested successfully', $correction_id];
+}
+
+function approveCorrection($correction_id, $activate = true) {
+    $db = getDBConnection();
+    
+    $user_id = $_SESSION['user_id'] ?? null;
+    if (!$user_id || !isAdmin()) {
+        return [false, 'Only administrators can approve corrections'];
+    }
+    
+    $stmt = $db->prepare("SELECT response_id, correction_text, report_id FROM response_corrections WHERE correction_id = ?");
+    $stmt->bind_param("i", $correction_id);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $correction = $result->fetch_assoc();
+    $stmt->close();
+    
+    if (!$correction) {
+        return [false, 'Correction not found'];
+    }
+    
+    $activated_at = $activate ? date('Y-m-d H:i:s') : null;
+    $stmt = $db->prepare("UPDATE response_corrections 
+                          SET admin_approved = 1, approved_by = ?, approved_at = NOW(), 
+                              activated_at = ?, is_active = ? 
+                          WHERE correction_id = ?");
+    $stmt->bind_param("isii", $user_id, $activated_at, $activate, $correction_id);
+    $stmt->execute();
+    $stmt->close();
+    
+    if ($activate) {
+        $stmt = $db->prepare("SELECT response_text, version FROM ai_responses WHERE id = ?");
+        $stmt->bind_param("i", $correction['response_id']);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $old_response = $result->fetch_assoc();
+        $stmt->close();
+        
+        $stmt = $db->prepare("INSERT INTO response_versions 
+                              (response_id, version_number, response_text, changed_by, change_reason, change_type) 
+                              VALUES (?, ?, ?, ?, 'Admin approved correction', 'correction')");
+        $stmt->bind_param("iisi",
+            $correction['response_id'],
+            $old_response['version'],
+            $old_response['response_text'],
+            $user_id
+        );
+        $stmt->execute();
+        $stmt->close();
+        
+        $new_version = $old_response['version'] + 1;
+        $stmt = $db->prepare("UPDATE ai_responses 
+                              SET response_text = ?, version = ?, correction_count = correction_count + 1, updated_at = NOW() 
+                              WHERE id = ?");
+        $stmt->bind_param("sii", $correction['correction_text'], $new_version, $correction['response_id']);
+        $stmt->execute();
+        $stmt->close();
+        
+        $stmt = $db->prepare("UPDATE response_corrections SET is_active = 0 WHERE response_id = ? AND correction_id != ?");
+        $stmt->bind_param("ii", $correction['response_id'], $correction_id);
+        $stmt->execute();
+        $stmt->close();
+    }
+    
+    if ($correction['report_id']) {
+        $db->query("UPDATE ai_response_reports SET status = 'closed', resolved_by = $user_id, 
+                    resolved_at = NOW(), resolution_notes = 'Correction approved and activated' 
+                    WHERE report_id = {$correction['report_id']}");
+    }
+    
+    logEvent('correction', "Correction approved for response {$correction['response_id']}", $user_id);
+    auditLog('approve_correction', 'response_corrections', $correction_id);
+    
+    return [true, 'Correction approved successfully'];
+}
+
+function markReportFalse($report_id, $notes = null) {
+    $db = getDBConnection();
+    
+    $user_id = $_SESSION['user_id'] ?? null;
+    if (!$user_id || !isStaff()) {
+        return [false, 'Only staff members can mark reports as false'];
+    }
+    
+    $stmt = $db->prepare("UPDATE ai_response_reports 
+                          SET status = 'false', is_false_report = 1, resolved_by = ?, 
+                              resolved_at = NOW(), resolution_notes = ? 
+                          WHERE report_id = ?");
+    $stmt->bind_param("isi", $user_id, $notes, $report_id);
+    $stmt->execute();
+    $affected = $stmt->affected_rows;
+    $stmt->close();
+    
+    if ($affected > 0) {
+        logEvent('report', "Report $report_id marked as false", $user_id);
+        auditLog('mark_report_false', 'ai_response_reports', $report_id);
+        return [true, 'Report marked as false'];
+    }
+    
+    return [false, 'Report not found or already processed'];
+}
+
+function getReports($filters = []) {
+    $db = getDBConnection();
+    
+    $where = [];
+    $params = [];
+    $types = '';
+    
+    if (!empty($filters['status'])) {
+        $where[] = "status = ?";
+        $params[] = $filters['status'];
+        $types .= 's';
+    }
+    
+    if (!empty($filters['report_type'])) {
+        $where[] = "report_type = ?";
+        $params[] = $filters['report_type'];
+        $types .= 's';
+    }
+    
+    if (!empty($filters['reporter_id'])) {
+        $where[] = "reporter_id = ?";
+        $params[] = $filters['reporter_id'];
+        $types .= 'i';
+    }
+    
+    $where_sql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+    $sql = "SELECT r.*, u.username as reporter_name FROM ai_response_reports r 
+            LEFT JOIN users u ON r.reporter_id = u.id 
+            $where_sql ORDER BY r.created_at DESC";
+    
+    if (!empty($params)) {
+        $stmt = $db->prepare($sql);
+        $stmt->bind_param($types, ...$params);
+        $stmt->execute();
+        $result = $stmt->get_result();
+    } else {
+        $result = $db->query($sql);
+    }
+    
+    $reports = [];
+    while ($row = $result->fetch_assoc()) {
+        $reports[] = $row;
+    }
+    
+    return $reports;
+}
+
+function getCorrections($filters = []) {
+    $db = getDBConnection();
+    
+    $where = [];
+    $params = [];
+    $types = '';
+    
+    if (isset($filters['admin_approved'])) {
+        $where[] = "admin_approved = ?";
+        $params[] = $filters['admin_approved'];
+        $types .= 'i';
+    }
+    
+    if (!empty($filters['response_id'])) {
+        $where[] = "response_id = ?";
+        $params[] = $filters['response_id'];
+        $types .= 'i';
+    }
+    
+    $where_sql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+    $sql = "SELECT c.*, u.username as suggested_by_name, a.username as approved_by_name 
+            FROM response_corrections c 
+            LEFT JOIN users u ON c.suggested_by = u.id 
+            LEFT JOIN users a ON c.approved_by = a.id 
+            $where_sql ORDER BY c.created_at DESC";
+    
+    if (!empty($params)) {
+        $stmt = $db->prepare($sql);
+        $stmt->bind_param($types, ...$params);
+        $stmt->execute();
+        $result = $stmt->get_result();
+    } else {
+        $result = $db->query($sql);
+    }
+    
+    $corrections = [];
+    while ($row = $result->fetch_assoc()) {
+        $corrections[] = $row;
+    }
+    
+    return $corrections;
+}
+
+function getReportStats() {
+    $db = getDBConnection();
+    
+    $stats = [
+        'total' => 0,
+        'pending' => 0,
+        'verified' => 0,
+        'false' => 0,
+        'closed' => 0,
+        'by_type' => []
+    ];
+    
+    $result = $db->query("SELECT status, COUNT(*) as count FROM ai_response_reports GROUP BY status");
+    while ($row = $result->fetch_assoc()) {
+        $stats[$row['status']] = $row['count'];
+        $stats['total'] += $row['count'];
+    }
+    
+    $result = $db->query("SELECT report_type, COUNT(*) as count FROM ai_response_reports GROUP BY report_type");
+    while ($row = $result->fetch_assoc()) {
+        $stats['by_type'][$row['report_type']] = $row['count'];
+    }
+    
+    return $stats;
+}
+
+
+// ============================================
+
+
+// dkai.php - Main application logic
 // ============================================
 // TEMPLATE RENDERING FUNCTIONS
 // ============================================
 
-/**
- * Render template with data
- */
 function render($template, $data = []) {
     extract($data);
     
@@ -1714,8 +3332,163 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $action = sanitize($_POST['action']);
     $response = ['success' => false, 'message' => 'Unknown action'];
     
+    $client_ip = getClientIP();
+    $skip_rate_limit_actions = ['login', 'logout', 'get_csrf_token'];
+    if (!in_array($action, $skip_rate_limit_actions) && getSetting('rate_limit_enabled', true)) {
+        list($rate_ok, $rate_msg) = checkRateLimit($client_ip, 'ip', 
+            getSetting('rate_limit_requests', 100), 
+            getSetting('rate_limit_window', 3600));
+        if (!$rate_ok) {
+            echo json_encode(['success' => false, 'message' => $rate_msg]);
+            exit;
+        }
+    }
+    
+    $skip_csrf_actions = ['login', 'chat', 'get_csrf_token'];
+    if (!in_array($action, $skip_csrf_actions) && getSetting('csrf_protection_enabled', true)) {
+        $csrf_token = $_POST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? null;
+        if (!$csrf_token || !validateCSRFToken($csrf_token)) {
+            echo json_encode(['success' => false, 'message' => 'Invalid security token. Please refresh the page.']);
+            exit;
+        }
+    }
+    
     try {
         switch ($action) {
+            case 'get_csrf_token':
+                $response = [
+                    'success' => true,
+                    'csrf_token' => generateCSRFToken()
+                ];
+                break;
+                
+            case 'submit_report':
+                $response_id = intval($_POST['response_id'] ?? 0);
+                $question_text = sanitize($_POST['question'] ?? '');
+                $response_text = sanitize($_POST['response'] ?? '');
+                $report_type = sanitize($_POST['report_type'] ?? 'incorrect');
+                $description = sanitize($_POST['description'] ?? '');
+                
+                list($success, $message, $report_id) = submitReport(
+                    $response_id, $question_text, $response_text, $report_type, $description
+                );
+                $response = [
+                    'success' => $success,
+                    'message' => $message,
+                    'report_id' => $report_id ?? null
+                ];
+                break;
+                
+            case 'suggest_correction':
+                if (!isStaff()) {
+                    throw new Exception('Unauthorized access');
+                }
+                
+                $response_id = intval($_POST['response_id'] ?? 0);
+                $report_id = intval($_POST['report_id'] ?? 0);
+                $correction_text = sanitize($_POST['correction_text'] ?? '');
+                $reasoning = sanitize($_POST['reasoning'] ?? '');
+                
+                list($success, $message, $correction_id) = suggestCorrection(
+                    $response_id, $report_id, $correction_text, $reasoning
+                );
+                $response = [
+                    'success' => $success,
+                    'message' => $message,
+                    'correction_id' => $correction_id ?? null
+                ];
+                break;
+                
+            case 'approve_correction':
+                if (!isAdmin()) {
+                    throw new Exception('Unauthorized access');
+                }
+                
+                $correction_id = intval($_POST['correction_id'] ?? 0);
+                $activate = isset($_POST['activate']) ? (bool)$_POST['activate'] : true;
+                
+                list($success, $message) = approveCorrection($correction_id, $activate);
+                $response = [
+                    'success' => $success,
+                    'message' => $message
+                ];
+                break;
+                
+            case 'mark_report_false':
+                if (!isStaff()) {
+                    throw new Exception('Unauthorized access');
+                }
+                
+                $report_id = intval($_POST['report_id'] ?? 0);
+                $notes = sanitize($_POST['notes'] ?? '');
+                
+                list($success, $message) = markReportFalse($report_id, $notes);
+                $response = [
+                    'success' => $success,
+                    'message' => $message
+                ];
+                break;
+                
+            case 'get_reports':
+                if (!isStaff()) {
+                    throw new Exception('Unauthorized access');
+                }
+                
+                $filters = [];
+                if (isset($_POST['status'])) $filters['status'] = sanitize($_POST['status']);
+                if (isset($_POST['report_type'])) $filters['report_type'] = sanitize($_POST['report_type']);
+                
+                $reports = getReports($filters);
+                $response = [
+                    'success' => true,
+                    'reports' => $reports,
+                    'count' => count($reports)
+                ];
+                break;
+                
+            case 'get_corrections':
+                if (!isStaff()) {
+                    throw new Exception('Unauthorized access');
+                }
+                
+                $filters = [];
+                if (isset($_POST['admin_approved'])) $filters['admin_approved'] = intval($_POST['admin_approved']);
+                
+                $corrections = getCorrections($filters);
+                $response = [
+                    'success' => true,
+                    'corrections' => $corrections,
+                    'count' => count($corrections)
+                ];
+                break;
+                
+            case 'get_report_stats':
+                if (!isStaff()) {
+                    throw new Exception('Unauthorized access');
+                }
+                
+                $stats = getReportStats();
+                $response = [
+                    'success' => true,
+                    'stats' => $stats
+                ];
+                break;
+                
+            case 'update_setting':
+                if (!isAdmin()) {
+                    throw new Exception('Unauthorized access');
+                }
+                
+                $key = sanitize($_POST['key'] ?? '');
+                $value = sanitize($_POST['value'] ?? '');
+                
+                $success = updateSetting($key, $value, $_SESSION['user_id']);
+                $response = [
+                    'success' => $success,
+                    'message' => $success ? 'Setting updated' : 'Failed to update setting'
+                ];
+                break;
+                
             case 'login':
                 $username = sanitize($_POST['username'] ?? '');
                 $password = $_POST['password'] ?? '';
