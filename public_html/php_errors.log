@@ -1,0 +1,55 @@
+[19-Jan-2026 07:24:42 UTC] PHP Fatal error:  Uncaught Error: Call to a member function prepare() on null in /home/u182854778/domains/ai.hidk.in/public_html/default.php:989
+Stack trace:
+#0 {main}
+  thrown in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 989
+[19-Jan-2026 07:24:42 UTC] PHP Fatal error:  Uncaught Error: Call to a member function prepare() on null in /home/u182854778/domains/ai.hidk.in/public_html/default.php:989
+Stack trace:
+#0 {main}
+  thrown in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 989
+[19-Jan-2026 07:47:13 UTC] PHP Fatal error:  Uncaught Error: Call to a member function prepare() on null in /home/u182854778/domains/ai.hidk.in/public_html/default.php:989
+Stack trace:
+#0 {main}
+  thrown in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 989
+[19-Jan-2026 07:47:13 UTC] PHP Fatal error:  Uncaught Error: Call to a member function prepare() on null in /home/u182854778/domains/ai.hidk.in/public_html/default.php:989
+Stack trace:
+#0 {main}
+  thrown in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 989
+[19-Jan-2026 07:48:12 UTC] PHP Fatal error:  Uncaught Error: Call to a member function prepare() on null in /home/u182854778/domains/ai.hidk.in/public_html/default.php:989
+Stack trace:
+#0 {main}
+  thrown in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 989
+[19-Jan-2026 07:48:16 UTC] PHP Fatal error:  Uncaught Error: Call to a member function prepare() on null in /home/u182854778/domains/ai.hidk.in/public_html/default.php:989
+Stack trace:
+#0 {main}
+  thrown in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 989
+[19-Jan-2026 07:48:21 UTC] PHP Fatal error:  Uncaught Error: Call to a member function prepare() on null in /home/u182854778/domains/ai.hidk.in/public_html/default.php:989
+Stack trace:
+#0 {main}
+  thrown in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 989
+[19-Jan-2026 07:48:30 UTC] PHP Fatal error:  Uncaught Error: Call to a member function prepare() on null in /home/u182854778/domains/ai.hidk.in/public_html/default.php:989
+Stack trace:
+#0 {main}
+  thrown in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 989
+[19-Jan-2026 07:48:51 UTC] PHP Fatal error:  Uncaught Error: Call to a member function prepare() on null in /home/u182854778/domains/ai.hidk.in/public_html/default.php:989
+Stack trace:
+#0 {main}
+  thrown in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 989
+[19-Jan-2026 07:55:08 UTC] PHP Warning:  unlink(/home/u182854778/domains/ai.hidk.in/public_html/test_write.txt): No such file or directory in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 12
+[19-Jan-2026 08:29:33 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
+[19-Jan-2026 08:29:54 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
+[19-Jan-2026 08:30:10 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
+[19-Jan-2026 08:36:03 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
+[19-Jan-2026 08:36:06 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
+[19-Jan-2026 08:36:11 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
+[19-Jan-2026 08:36:27 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
+[19-Jan-2026 08:36:34 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
+[19-Jan-2026 09:16:34 UTC] PHP Warning:  unlink(/home/u182854778/domains/ai.hidk.in/public_html/test_write.txt): No such file or directory in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 12
+[19-Jan-2026 09:20:39 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
+[19-Jan-2026 09:20:44 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
+[19-Jan-2026 09:23:08 UTC] PHP Warning:  unlink(/home/u182854778/domains/ai.hidk.in/public_html/test_write.txt): No such file or directory in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 12
+[19-Jan-2026 09:25:03 UTC] PHP Warning:  Undefined array key "responses" in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 1625
+[19-Jan-2026 09:25:03 UTC] PHP Warning:  Undefined array key "responses" in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 1629
+[19-Jan-2026 09:25:20 UTC] PHP Warning:  Undefined array key "responses" in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 1625
+[19-Jan-2026 09:25:20 UTC] PHP Warning:  Undefined array key "responses" in /home/u182854778/domains/ai.hidk.in/public_html/default.php on line 1629
+[19-Jan-2026 11:27:51 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
+[19-Jan-2026 11:27:57 UTC] Storage stats failed: Unknown column 'is_deleted' in 'WHERE'
