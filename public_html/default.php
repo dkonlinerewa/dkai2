@@ -172,6 +172,251 @@ function isIPBlocked($ip) {
 }
 
 // ============================================
+// ADMIN SETTINGS FUNCTIONS
+// ============================================
+
+function getSetting($key, $default = null) {
+    $db = getDBConnection();
+    $stmt = $db->prepare("SELECT setting_value, setting_type FROM admin_settings WHERE setting_key = ?");
+    $stmt->bind_param("s", $key);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $setting = $result->fetch_assoc();
+    $stmt->close();
+    
+    if (!$setting) {
+        return $default;
+    }
+    
+    $value = $setting['setting_value'];
+    
+    switch ($setting['setting_type']) {
+        case 'boolean':
+            return $value === '1' || $value === true;
+        case 'integer':
+            return (int)$value;
+        case 'float':
+            return (float)$value;
+        case 'json':
+            return json_decode($value, true) ?? $default;
+        default:
+            return $value;
+    }
+}
+
+// ============================================
+// RATE LIMITING FUNCTIONS
+// ============================================
+
+function checkRateLimit($identifier, $identifierType = 'session') {
+    if (!getSetting('rate_limit_enabled', true)) {
+        return [true, 0, 0];
+    }
+    
+    $db = getDBConnection();
+    $window = getSetting('rate_limit_window', 3600);
+    $maxRequests = getSetting('rate_limit_requests', 100);
+    
+    $db->begin_transaction();
+    try {
+        $stmt = $db->prepare("SELECT limit_id, request_count, window_start, blocked_until FROM rate_limits 
+                             WHERE identifier = ? AND identifier_type = ? FOR UPDATE");
+        $stmt->bind_param("ss", $identifier, $identifierType);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $rateLimit = $result->fetch_assoc();
+        $stmt->close();
+        
+        $now = date('Y-m-d H:i:s');
+        $windowStart = date('Y-m-d H:i:s', time() - $window);
+        
+        if ($rateLimit) {
+            if ($rateLimit['blocked_until'] && $rateLimit['blocked_until'] > $now) {
+                $db->commit();
+                return [false, 0, strtotime($rateLimit['blocked_until']) - time()];
+            }
+            
+            if ($rateLimit['window_start'] < $windowStart) {
+                $stmt = $db->prepare("UPDATE rate_limits SET request_count = 1, window_start = NOW(), last_request = NOW() 
+                                     WHERE limit_id = ?");
+                $stmt->bind_param("i", $rateLimit['limit_id']);
+                $stmt->execute();
+                $stmt->close();
+                $currentCount = 1;
+            } else {
+                $stmt = $db->prepare("UPDATE rate_limits SET request_count = request_count + 1, last_request = NOW() 
+                                     WHERE limit_id = ?");
+                $stmt->bind_param("i", $rateLimit['limit_id']);
+                $stmt->execute();
+                $stmt->close();
+                $currentCount = $rateLimit['request_count'] + 1;
+            }
+        } else {
+            $stmt = $db->prepare("INSERT INTO rate_limits (identifier, identifier_type, request_count, window_start, last_request) 
+                                 VALUES (?, ?, 1, NOW(), NOW())");
+            $stmt->bind_param("ss", $identifier, $identifierType);
+            $stmt->execute();
+            $stmt->close();
+            $currentCount = 1;
+        }
+        
+        if ($currentCount > $maxRequests) {
+            $blockDuration = 3600;
+            $stmt = $db->prepare("UPDATE rate_limits SET blocked_until = DATE_ADD(NOW(), INTERVAL ? SECOND) 
+                                 WHERE identifier = ? AND identifier_type = ?");
+            $stmt->bind_param("iss", $blockDuration, $identifier, $identifierType);
+            $stmt->execute();
+            $stmt->close();
+            $db->commit();
+            return [false, $currentCount, $blockDuration];
+        }
+        
+        $db->commit();
+        return [true, $currentCount, 0];
+        
+    } catch (Exception $e) {
+        $db->rollback();
+        error_log("Rate limit check failed: " . $e->getMessage());
+        return [true, 0, 0];
+    }
+}
+
+// ============================================
+// CONTENT FILTERING FUNCTIONS
+// ============================================
+
+function filterContent($content) {
+    if (!getSetting('content_filtering_enabled', true)) {
+        return $content;
+    }
+    
+    $spamPatterns = [
+        '/\b(viagra|cialis|levitra|pharmacy|pills|drugs)\b/i',
+        '/\b(earn money|make cash|work from home|get rich)\b/i',
+        '/\b(casino|gambling|betting|lottery|jackpot)\b/i',
+        '/\b(sex|porn|xxx|nude|adult)\b/i',
+        '/<script[^>]*>.*?<\/script>/is',
+        '/<iframe[^>]*>.*?<\/iframe>/is',
+        '/<object[^>]*>.*?<\/object>/is',
+        '/javascript:/i'
+    ];
+    
+    foreach ($spamPatterns as $pattern) {
+        $content = preg_replace($pattern, '[filtered]', $content);
+    }
+    
+    return $content;
+}
+
+// ============================================
+// DEVICE FINGERPRINTING FUNCTIONS
+// ============================================
+
+function saveDeviceFingerprint($userId = null) {
+    if (!getSetting('device_fingerprinting_enabled', true)) {
+        return null;
+    }
+    
+    $fingerprintData = [
+        'ua' => $_SERVER['HTTP_USER_AGENT'] ?? '',
+        'ip' => getClientIP(),
+        'sr' => $_COOKIE['screen_resolution'] ?? '',
+        'tz' => $_COOKIE['timezone'] ?? '',
+        'lang' => $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '',
+        'platform' => $_COOKIE['platform'] ?? ''
+    ];
+    
+    $fingerprintString = implode('|', array_values($fingerprintData));
+    $fingerprintHash = hash('sha256', $fingerprintString);
+    
+    $db = getDBConnection();
+    $stmt = $db->prepare("INSERT INTO device_fingerprints 
+                         (user_id, fingerprint_hash, user_agent, ip_address, screen_resolution, timezone, language, platform) 
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?) 
+                         ON DUPLICATE KEY UPDATE last_seen = NOW()");
+    $stmt->bind_param("isssssss",
+        $userId,
+        $fingerprintHash,
+        $fingerprintData['ua'],
+        $fingerprintData['ip'],
+        $fingerprintData['sr'],
+        $fingerprintData['tz'],
+        $fingerprintData['lang'],
+        $fingerprintData['platform']
+    );
+    $stmt->execute();
+    $stmt->close();
+    
+    return $fingerprintHash;
+}
+
+// ============================================
+// CSRF PROTECTION FUNCTIONS
+// ============================================
+
+function generateCSRFToken($formName = 'default') {
+    if (!getSetting('csrf_protection_enabled', true)) {
+        return 'csrf_disabled';
+    }
+    
+    $token = bin2hex(random_bytes(32));
+    $sessionId = session_id();
+    $userId = $_SESSION['user_id'] ?? null;
+    $expiresAt = date('Y-m-d H:i:s', time() + 3600);
+    
+    $db = getDBConnection();
+    $stmt = $db->prepare("INSERT INTO csrf_tokens (token, user_id, session_id, ip_address, expires_at) 
+                         VALUES (?, ?, ?, ?, ?)");
+    $stmt->bind_param("sisss",
+        $token,
+        $userId,
+        $sessionId,
+        getClientIP(),
+        $expiresAt
+    );
+    $stmt->execute();
+    $stmt->close();
+    
+    return $token;
+}
+
+function validateCSRFToken($token, $formName = 'default') {
+    if (!getSetting('csrf_protection_enabled', true)) {
+        return true;
+    }
+    
+    if (!$token || $token === 'csrf_disabled') {
+        return false;
+    }
+    
+    $db = getDBConnection();
+    $stmt = $db->prepare("SELECT token_id, used, expires_at FROM csrf_tokens 
+                         WHERE token = ? AND (user_id = ? OR session_id = ?) AND used = 0 FOR UPDATE");
+    $userId = $_SESSION['user_id'] ?? null;
+    $sessionId = session_id();
+    $stmt->bind_param("sis", $token, $userId, $sessionId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $csrfToken = $result->fetch_assoc();
+    $stmt->close();
+    
+    if (!$csrfToken) {
+        return false;
+    }
+    
+    if ($csrfToken['expires_at'] < date('Y-m-d H:i:s')) {
+        return false;
+    }
+    
+    $stmt = $db->prepare("UPDATE csrf_tokens SET used = 1 WHERE token_id = ?");
+    $stmt->bind_param("i", $csrfToken['token_id']);
+    $stmt->execute();
+    $stmt->close();
+    
+    return true;
+}
+
+// ============================================
 // DATABASE CONNECTION
 // ============================================
 
