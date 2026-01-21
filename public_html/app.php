@@ -6,6 +6,8 @@ define('CONFIG_DIR', __DIR__);
 define('CONFIG_LOADED', true);
 if (file_exists(APP_ROOT . '/.env.php')) {
     require_once APP_ROOT . '/.env.php';
+} elseif (file_exists(APP_ROOT . '/.env.php.example')) {
+    require_once APP_ROOT . '/.env.php.example';
 } else {
     die('Configuration file not found. Please create .env.php');
 }
@@ -22,21 +24,14 @@ if (ENVIRONMENT === 'development') {
 ini_set('log_errors', 1);
 ini_set('error_log', APP_ROOT . '/logs/php_errors.log');
 
-define('UPLOAD_DIR', APP_ROOT . '/uploads/');
-define('MAX_FILE_SIZE', 10 * 1024 * 1024);
-define('ALLOWED_TYPES', ['pdf', 'txt', 'doc', 'docx', 'csv', 'md', 'rtf', 'xls', 'xlsx', 'ppt', 'pptx']);
-define('IMAGE_TYPES', ['jpg', 'jpeg', 'png', 'gif', 'webp']);
-define('SESSION_LIFETIME', 24 * 60 * 60);
-define('MAX_LOGIN_ATTEMPTS', 5);
-define('LOCKOUT_TIME', 15 * 60);
-define('API_RATE_LIMIT', 100);
-define('PASSWORD_MIN_LENGTH', 8);
-define('TOKEN_EXPIRY', 3600);
+if (!defined('UPLOAD_DIR')) { define('UPLOAD_DIR', APP_ROOT . '/uploads/'); }
+if (!defined('ALLOWED_TYPES')) { define('ALLOWED_TYPES', ['pdf', 'txt', 'doc', 'docx', 'csv', 'md', 'rtf', 'xls', 'xlsx', 'ppt', 'pptx']); }
+if (!defined('IMAGE_TYPES')) { define('IMAGE_TYPES', ['jpg', 'jpeg', 'png', 'gif', 'webp']); }
 
-define('TEMPLATES_DIR', APP_ROOT . '/templates/');
-define('LOGS_DIR', APP_ROOT . '/logs/');
-define('CACHE_DIR', APP_ROOT . '/cache/');
-define('BACKUP_DIR', APP_ROOT . '/backups/');
+if (!defined('TEMPLATES_DIR')) { define('TEMPLATES_DIR', APP_ROOT . '/templates/'); }
+if (!defined('LOGS_DIR')) { define('LOGS_DIR', APP_ROOT . '/logs/'); }
+if (!defined('CACHE_DIR')) { define('CACHE_DIR', APP_ROOT . '/cache/'); }
+if (!defined('BACKUP_DIR')) { define('BACKUP_DIR', APP_ROOT . '/backups/'); }
 
 function generateToken($length = 32) {
     return bin2hex(random_bytes($length));
@@ -141,9 +136,26 @@ function isIPBlocked($ip) {
     return $count > 0;
 }
 
+function clearSettingsCache() {
+    $GLOBALS['__settings_cache'] = [];
+}
+
 function getSetting($key, $default = null) {
+    if (!isset($GLOBALS['__settings_cache'])) {
+        $GLOBALS['__settings_cache'] = [];
+    }
+    
+    if (array_key_exists($key, $GLOBALS['__settings_cache'])) {
+        return $GLOBALS['__settings_cache'][$key];
+    }
+    
     $db = getDBConnection();
     $stmt = $db->prepare("SELECT setting_value, setting_type FROM admin_settings WHERE setting_key = ?");
+    if (!$stmt) {
+        $GLOBALS['__settings_cache'][$key] = $default;
+        return $default;
+    }
+    
     $stmt->bind_param("s", $key);
     $stmt->execute();
     $result = $stmt->get_result();
@@ -151,6 +163,7 @@ function getSetting($key, $default = null) {
     $stmt->close();
     
     if (!$setting) {
+        $GLOBALS['__settings_cache'][$key] = $default;
         return $default;
     }
     
@@ -158,16 +171,88 @@ function getSetting($key, $default = null) {
     
     switch ($setting['setting_type']) {
         case 'boolean':
-            return $value === '1' || $value === true;
+            $parsed = $value === '1' || $value === 1 || $value === true;
+            break;
         case 'integer':
-            return (int)$value;
+            $parsed = (int)$value;
+            break;
         case 'float':
-            return (float)$value;
+            $parsed = (float)$value;
+            break;
         case 'json':
-            return json_decode($value, true) ?? $default;
+            $parsed = json_decode($value, true);
+            if ($parsed === null) {
+                $parsed = $default;
+            }
+            break;
         default:
-            return $value;
+            $parsed = $value;
+            break;
     }
+    
+    $GLOBALS['__settings_cache'][$key] = $parsed;
+    return $parsed;
+}
+
+function updateSetting($key, $value, $type = 'string', $description = null, $updatedBy = null) {
+    $db = getDBConnection();
+    
+    $updatedBy = $updatedBy ?? ($_SESSION['user_id'] ?? null);
+    
+    $stmt = $db->prepare("SELECT setting_value, setting_type, description FROM admin_settings WHERE setting_key = ?");
+    $stmt->bind_param("s", $key);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $existing = $result->fetch_assoc();
+    $stmt->close();
+    
+    $storedValue = $value;
+    switch ($type) {
+        case 'boolean':
+            $storedValue = $value ? '1' : '0';
+            break;
+        case 'integer':
+            $storedValue = (string)(int)$value;
+            break;
+        case 'float':
+            $storedValue = (string)(float)$value;
+            break;
+        case 'json':
+            $storedValue = is_string($value) ? $value : json_encode($value);
+            break;
+        default:
+            $storedValue = (string)$value;
+            break;
+    }
+    
+    $stmt = $db->prepare("INSERT INTO admin_settings (setting_key, setting_value, setting_type, description, updated_by)
+                          VALUES (?, ?, ?, ?, ?)
+                          ON DUPLICATE KEY UPDATE
+                          setting_value = VALUES(setting_value),
+                          setting_type = VALUES(setting_type),
+                          description = COALESCE(VALUES(description), description),
+                          updated_by = VALUES(updated_by),
+                          updated_at = CURRENT_TIMESTAMP");
+    $stmt->bind_param("ssssi", $key, $storedValue, $type, $description, $updatedBy);
+    $ok = $stmt->execute();
+    $stmt->close();
+    
+    if ($ok) {
+        $oldAudit = $existing ? json_encode(['key' => $key, 'value' => $existing['setting_value'], 'type' => $existing['setting_type']]) : null;
+        $newAudit = json_encode(['key' => $key, 'value' => $storedValue, 'type' => $type]);
+        auditLog('update_setting', 'admin_settings', 0, $oldAudit, $newAudit);
+        clearSettingsCache();
+    }
+    
+    return $ok;
+}
+
+function bindStatementParams($stmt, $types, $params) {
+    $args = [$types];
+    foreach ($params as $k => $v) {
+        $args[] = &$params[$k];
+    }
+    return call_user_func_array([$stmt, 'bind_param'], $args);
 }
 
 function checkRateLimit($identifier, $identifierType = 'session') {
@@ -317,11 +402,12 @@ function generateCSRFToken($formName = 'default') {
     $db = getDBConnection();
     $stmt = $db->prepare("INSERT INTO csrf_tokens (token, user_id, session_id, ip_address, expires_at) 
                          VALUES (?, ?, ?, ?, ?)");
+    $clientIP = getClientIP();
     $stmt->bind_param("sisss",
         $token,
         $userId,
         $sessionId,
-        getClientIP(),
+        $clientIP,
         $expiresAt
     );
     $stmt->execute();
@@ -543,6 +629,30 @@ function initDatabase() {
                 FOREIGN KEY (trained_by) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
             
+            'training_qa' => "CREATE TABLE IF NOT EXISTS training_qa (
+                qa_id INT AUTO_INCREMENT PRIMARY KEY,
+                question_text TEXT NOT NULL,
+                response_text TEXT NOT NULL,
+                response_order INT DEFAULT 1,
+                is_active TINYINT(1) DEFAULT 1,
+                approval_status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+                created_by INT,
+                approved_by INT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                approved_at DATETIME,
+                confidence_score DECIMAL(5,2) DEFAULT 0.00,
+                usage_count INT DEFAULT 0,
+                feedback_score INT DEFAULT 0,
+                INDEX idx_is_active (is_active),
+                INDEX idx_created_at (created_at),
+                INDEX idx_created_by (created_by),
+                INDEX idx_approval_status (approval_status),
+                FULLTEXT INDEX ft_question_text (question_text),
+                FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+                FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
             'system_logs' => "CREATE TABLE IF NOT EXISTS system_logs (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 log_type VARCHAR(50) NOT NULL,
@@ -669,6 +779,9 @@ function initDatabase() {
                 correction_text TEXT NOT NULL,
                 original_response_text TEXT,
                 reasoning TEXT,
+                staff_custom_response TEXT,
+                staff_selected_option ENUM('ai', 'custom', 'suggested', 'manual') DEFAULT 'custom',
+                staff_notes TEXT,
                 admin_approved TINYINT(1) DEFAULT 0,
                 approved_by INT,
                 approved_at DATETIME,
@@ -681,6 +794,7 @@ function initDatabase() {
                 INDEX idx_suggested_by (suggested_by),
                 INDEX idx_admin_approved (admin_approved),
                 INDEX idx_is_active (is_active),
+                INDEX idx_staff_selected_option (staff_selected_option),
                 FOREIGN KEY (suggested_by) REFERENCES users(id) ON DELETE CASCADE,
                 FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL,
                 FOREIGN KEY (report_id) REFERENCES ai_response_reports(report_id) ON DELETE CASCADE
@@ -714,6 +828,7 @@ function initDatabase() {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 last_used_at DATETIME,
+                usage_count INT DEFAULT 0,
                 version INT DEFAULT 1,
                 INDEX idx_question_hash (question_hash),
                 INDEX idx_is_active (is_active),
@@ -745,6 +860,7 @@ function initDatabase() {
                 metadata TEXT,
                 hit_count INT DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_accessed DATETIME,
                 expires_at DATETIME,
                 INDEX idx_cache_key (cache_key),
                 INDEX idx_expires_at (expires_at)
@@ -907,7 +1023,7 @@ function auditLog($action, $entityType = null, $entityId = null, $oldValue = nul
     try {
         $stmt = $db->prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, old_value, new_value, ip_address, user_agent) 
                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-        $stmt->bind_param("issiisss",
+        $stmt->bind_param("ississss",
             $userId,
             $action,
             $entityType,
@@ -1470,7 +1586,7 @@ function getDocuments($filters = []) {
     try {
         $stmt = $db->prepare($sql);
         if ($params) {
-            $stmt->bind_param($types, ...$params);
+            bindStatementParams($stmt, $types, $params);
         }
         $stmt->execute();
         $result = $stmt->get_result();
@@ -1590,7 +1706,7 @@ function getAllUsers($filters = []) {
     try {
         $stmt = $db->prepare($sql);
         if ($params) {
-            $stmt->bind_param($types, ...$params);
+            bindStatementParams($stmt, $types, $params);
         }
         $stmt->execute();
         $result = $stmt->get_result();
@@ -1819,7 +1935,8 @@ function loginUser($username, $password) {
         
         $stmt = $db->prepare("INSERT INTO user_sessions (user_id, session_token, ip_address, user_agent, expires_at) 
                               VALUES (?, ?, ?, ?, ?)");
-        $stmt->bind_param("issss", $user['id'], $sessionId, getClientIP(), $ua, $expires);
+        $clientIP = getClientIP();
+        $stmt->bind_param("issss", $user['id'], $sessionId, $clientIP, $ua, $expires);
         $stmt->execute();
         $stmt->close();
         
@@ -2005,7 +2122,7 @@ function getChatSessions($filters = []) {
     try {
         $stmt = $db->prepare($sql);
         if ($params) {
-            $stmt->bind_param($types, ...$params);
+            bindStatementParams($stmt, $types, $params);
         }
         $stmt->execute();
         $result = $stmt->get_result();
@@ -2121,7 +2238,7 @@ function getSystemLogs($filters = []) {
     try {
         $stmt = $db->prepare($sql);
         if ($params) {
-            $stmt->bind_param($types, ...$params);
+            bindStatementParams($stmt, $types, $params);
         }
         $stmt->execute();
         $result = $stmt->get_result();
@@ -2352,13 +2469,14 @@ function rateResponse($responseId, $sessionId, $question, $response, $rating, $f
         $stmt = $db->prepare("INSERT INTO response_ratings 
                               (message_id, session_id, user_id, question, response, rating, feedback) 
                               VALUES (?, ?, ?, ?, ?, ?, ?)");
-        $stmt->bind_param("sisssi",
+        $stmt->bind_param("isissis",
             $responseId,
             $sessionId,
             $userId,
             $question,
             $response,
-            $rating
+            $rating,
+            $feedback
         );
         $stmt->execute();
         $ratingId = $db->insert_id;
@@ -2416,11 +2534,12 @@ function submitReport($responseId, $reporterSession, $reportType, $description =
                              (response_id, reporter_id, reporter_session, reporter_ip, report_type, 
                               description, question_text, response_text) 
                              VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        $clientIP = getClientIP();
         $stmt->bind_param("iissssss",
             $responseId,
             $reporterId,
             $reporterSession,
-            getClientIP(),
+            $clientIP,
             $reportType,
             $description,
             $questionText,
@@ -2805,7 +2924,7 @@ function getReports($filters = []) {
     try {
         $stmt = $db->prepare($sql);
         if ($params) {
-            $stmt->bind_param($types, ...$params);
+            bindStatementParams($stmt, $types, $params);
         }
         $stmt->execute();
         $result = $stmt->get_result();
@@ -2873,6 +2992,7 @@ startSecureSession();
 
 $db = initDatabase();
 
+if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
 $action = $_POST['action'] ?? $_GET['action'] ?? 'view_home';
 
 $csrfToken = $_POST['csrf_token'] ?? $_GET['csrf_token'] ?? '';
@@ -3397,5 +3517,6 @@ switch ($action) {
         http_response_code(400);
         echo json_encode(['success' => false, 'message' => 'Invalid action']);
         break;
+}
 }
 ?>
