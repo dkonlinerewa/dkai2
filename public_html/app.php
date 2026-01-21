@@ -6,6 +6,8 @@ define('CONFIG_DIR', __DIR__);
 define('CONFIG_LOADED', true);
 if (file_exists(APP_ROOT . '/.env.php')) {
     require_once APP_ROOT . '/.env.php';
+} elseif (file_exists(APP_ROOT . '/.env.php.example')) {
+    require_once APP_ROOT . '/.env.php.example';
 } else {
     die('Configuration file not found. Please create .env.php');
 }
@@ -627,6 +629,30 @@ function initDatabase() {
                 FOREIGN KEY (trained_by) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
             
+            'training_qa' => "CREATE TABLE IF NOT EXISTS training_qa (
+                qa_id INT AUTO_INCREMENT PRIMARY KEY,
+                question_text TEXT NOT NULL,
+                response_text TEXT NOT NULL,
+                response_order INT DEFAULT 1,
+                is_active TINYINT(1) DEFAULT 1,
+                approval_status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+                created_by INT,
+                approved_by INT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                approved_at DATETIME,
+                confidence_score DECIMAL(5,2) DEFAULT 0.00,
+                usage_count INT DEFAULT 0,
+                feedback_score INT DEFAULT 0,
+                INDEX idx_is_active (is_active),
+                INDEX idx_created_at (created_at),
+                INDEX idx_created_by (created_by),
+                INDEX idx_approval_status (approval_status),
+                FULLTEXT INDEX ft_question_text (question_text),
+                FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+                FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            
             'system_logs' => "CREATE TABLE IF NOT EXISTS system_logs (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 log_type VARCHAR(50) NOT NULL,
@@ -834,6 +860,7 @@ function initDatabase() {
                 metadata TEXT,
                 hit_count INT DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_accessed DATETIME,
                 expires_at DATETIME,
                 INDEX idx_cache_key (cache_key),
                 INDEX idx_expires_at (expires_at)
@@ -1908,7 +1935,8 @@ function loginUser($username, $password) {
         
         $stmt = $db->prepare("INSERT INTO user_sessions (user_id, session_token, ip_address, user_agent, expires_at) 
                               VALUES (?, ?, ?, ?, ?)");
-        $stmt->bind_param("issss", $user['id'], $sessionId, getClientIP(), $ua, $expires);
+        $clientIP = getClientIP();
+        $stmt->bind_param("issss", $user['id'], $sessionId, $clientIP, $ua, $expires);
         $stmt->execute();
         $stmt->close();
         
@@ -2506,11 +2534,12 @@ function submitReport($responseId, $reporterSession, $reportType, $description =
                              (response_id, reporter_id, reporter_session, reporter_ip, report_type, 
                               description, question_text, response_text) 
                              VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        $clientIP = getClientIP();
         $stmt->bind_param("iissssss",
             $responseId,
             $reporterId,
             $reporterSession,
-            getClientIP(),
+            $clientIP,
             $reportType,
             $description,
             $questionText,
@@ -2963,6 +2992,7 @@ startSecureSession();
 
 $db = initDatabase();
 
+if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
 $action = $_POST['action'] ?? $_GET['action'] ?? 'view_home';
 
 $csrfToken = $_POST['csrf_token'] ?? $_GET['csrf_token'] ?? '';
@@ -3487,5 +3517,6 @@ switch ($action) {
         http_response_code(400);
         echo json_encode(['success' => false, 'message' => 'Invalid action']);
         break;
+}
 }
 ?>

@@ -5,6 +5,8 @@ define('CONFIG_DIR', __DIR__);
 define('CONFIG_LOADED', true);
 if (file_exists(APP_ROOT . '/.env.php')) {
     require_once APP_ROOT . '/.env.php';
+} elseif (file_exists(APP_ROOT . '/.env.php.example')) {
+    require_once APP_ROOT . '/.env.php.example';
 } else {
     die('Configuration file not found. Please create .env.php');
 }
@@ -24,24 +26,17 @@ ini_set('error_log', APP_ROOT . '/logs/php_errors.log');
 // ============================================
 // APPLICATION CONSTANTS
 // ============================================
-define('UPLOAD_DIR', APP_ROOT . '/uploads/');
-define('MAX_FILE_SIZE', 10 * 1024 * 1024); // 10MB
-define('ALLOWED_TYPES', ['pdf', 'txt', 'doc', 'docx', 'csv', 'md', 'rtf', 'xls', 'xlsx', 'ppt', 'pptx']);
-define('IMAGE_TYPES', ['jpg', 'jpeg', 'png', 'gif', 'webp']);
-define('SESSION_LIFETIME', 24 * 60 * 60); // 24 hours
-define('MAX_LOGIN_ATTEMPTS', 5);
-define('LOCKOUT_TIME', 15 * 60); // 15 minutes
-define('API_RATE_LIMIT', 100); // Requests per hour
-define('PASSWORD_MIN_LENGTH', 8);
-define('TOKEN_EXPIRY', 3600); // 1 hour
+if (!defined('UPLOAD_DIR')) { define('UPLOAD_DIR', APP_ROOT . '/uploads/'); }
+if (!defined('ALLOWED_TYPES')) { define('ALLOWED_TYPES', ['pdf', 'txt', 'doc', 'docx', 'csv', 'md', 'rtf', 'xls', 'xlsx', 'ppt', 'pptx']); }
+if (!defined('IMAGE_TYPES')) { define('IMAGE_TYPES', ['jpg', 'jpeg', 'png', 'gif', 'webp']); }
 
 // ============================================
 // FILE PATHS
 // ============================================
-define('TEMPLATES_DIR', APP_ROOT . '/templates/');
-define('LOGS_DIR', APP_ROOT . '/logs/');
-define('CACHE_DIR', APP_ROOT . '/cache/');
-define('BACKUP_DIR', APP_ROOT . '/backups/');
+if (!defined('TEMPLATES_DIR')) { define('TEMPLATES_DIR', APP_ROOT . '/templates/'); }
+if (!defined('LOGS_DIR')) { define('LOGS_DIR', APP_ROOT . '/logs/'); }
+if (!defined('CACHE_DIR')) { define('CACHE_DIR', APP_ROOT . '/cache/'); }
+if (!defined('BACKUP_DIR')) { define('BACKUP_DIR', APP_ROOT . '/backups/'); }
 
 // ============================================
 // SECURITY FUNCTIONS
@@ -367,11 +362,12 @@ function generateCSRFToken($formName = 'default') {
     $db = getDBConnection();
     $stmt = $db->prepare("INSERT INTO csrf_tokens (token, user_id, session_id, ip_address, expires_at) 
                          VALUES (?, ?, ?, ?, ?)");
+    $clientIP = getClientIP();
     $stmt->bind_param("sisss",
         $token,
         $userId,
         $sessionId,
-        getClientIP(),
+        $clientIP,
         $expiresAt
     );
     $stmt->execute();

@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS ai_responses (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     last_used_at DATETIME,
+    usage_count INT DEFAULT 0,
     version INT DEFAULT 1,
     INDEX idx_question_hash (question_hash),
     INDEX idx_is_active (is_active),
@@ -137,6 +138,7 @@ CREATE TABLE IF NOT EXISTS response_cache (
     metadata TEXT,
     hit_count INT DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_accessed DATETIME,
     expires_at DATETIME,
     INDEX idx_cache_key (cache_key),
     INDEX idx_expires_at (expires_at)
@@ -190,6 +192,42 @@ CREATE TABLE IF NOT EXISTS device_fingerprints (
     INDEX idx_fingerprint_hash (fingerprint_hash),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Create training_qa table
+CREATE TABLE IF NOT EXISTS training_qa (
+    qa_id INT AUTO_INCREMENT PRIMARY KEY,
+    question_text TEXT NOT NULL,
+    response_text TEXT NOT NULL,
+    response_order INT DEFAULT 1,
+    is_active TINYINT(1) DEFAULT 1,
+    approval_status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+    created_by INT,
+    approved_by INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    approved_at DATETIME,
+    confidence_score DECIMAL(5,2) DEFAULT 0.00,
+    usage_count INT DEFAULT 0,
+    feedback_score INT DEFAULT 0,
+    INDEX idx_is_active (is_active),
+    INDEX idx_created_at (created_at),
+    INDEX idx_created_by (created_by),
+    INDEX idx_approval_status (approval_status),
+    FULLTEXT INDEX ft_question_text (question_text),
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+ALTER TABLE response_cache 
+ADD COLUMN IF NOT EXISTS last_accessed DATETIME AFTER created_at;
+
+ALTER TABLE ai_responses 
+ADD COLUMN IF NOT EXISTS usage_count INT DEFAULT 0 AFTER last_used_at;
+
+ALTER TABLE response_corrections 
+ADD COLUMN IF NOT EXISTS staff_custom_response TEXT AFTER reasoning,
+ADD COLUMN IF NOT EXISTS staff_selected_option ENUM('ai', 'custom', 'suggested', 'manual') DEFAULT 'custom' AFTER staff_custom_response,
+ADD COLUMN IF NOT EXISTS staff_notes TEXT AFTER staff_selected_option;
 
 -- Add new columns to existing tables if they don't exist
 ALTER TABLE response_ratings 
